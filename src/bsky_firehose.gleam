@@ -310,17 +310,20 @@ pub fn main() {
   let hub = start_hub()
   logging.log(logging.Info, "Hub started")
 
-  start_firehose(hub)
-
+  // Start HTTP server before the firehose so the port is open immediately.
+  // The firehose retry loop can take a few seconds, and Fly expects the
+  // port to be listening quickly after boot.
   let assert Ok(_) =
     mist.new(fn(req) { handle_request(req, hub) })
     |> mist.bind("0.0.0.0")
     |> mist.port(8000)
     |> mist.start
 
-  logging.log(logging.Info, "Listening on http://localhost:8000")
+  logging.log(logging.Info, "Listening on port 8000")
   logging.log(logging.Info, "  GET /          - server info")
   logging.log(logging.Info, "  GET /firehose  - SSE stream of posts")
+
+  start_firehose(hub)
 
   process.sleep_forever()
 }
@@ -346,7 +349,7 @@ fn handle_request(
         <> stats.started_at
         <> "\nProcessed: "
         <> int.to_string(stats.count)
-        <> " posts\n\nGET /firehose - SSE stream of posts\n\ncurl -N http://localhost:8000/firehose"
+        <> " posts\n\nGET /firehose - SSE stream of posts\n\ncurl -N https://gleam-bsky-firehose.fly.dev/firehose"
 
       response.new(200)
       |> response.set_header("content-type", "text/plain")
