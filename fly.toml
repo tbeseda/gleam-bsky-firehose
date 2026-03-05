@@ -15,5 +15,5 @@ primary_region = 'dfw'
   processes = ['app']
 
 [[vm]]
-  memory = '256mb'
+  memory = 256
   cpus = 1
