@@ -1,5 +1,5 @@
-name = "hello_gleam"
-version = "1.0.0"
+name = "bsky_firehose"
+version = "0.0.1"
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
@@ -8,7 +8,7 @@ gleam_erlang = ">= 1.2.0 and < 2.0.0"
 gleam_otp = ">= 1.0.0 and < 2.0.0"
 gleam_json = ">= 3.0.0 and < 4.0.0"
 mist = ">= 5.0.0 and < 6.0.0"
-stratus = { git = "https://github.com/rawhat/stratus.git", ref = "main" }
+stratus = ">= 2.0.0 and < 3.0.0"
 logging = ">= 1.3.0 and < 2.0.0"
 birl = ">= 1.8.0 and < 2.0.0"
 
