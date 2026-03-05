@@ -1,0 +1,20 @@
+# fly.toml app configuration file generated for gleam-bsky-firehose on 2026-03-04T17:35:02-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'gleam-bsky-firehose'
+primary_region = 'dfw'
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpus = 1
+  memory_mb = 512

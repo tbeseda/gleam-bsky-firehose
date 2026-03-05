@@ -314,6 +314,7 @@ pub fn main() {
 
   let assert Ok(_) =
     mist.new(fn(req) { handle_request(req, hub) })
+    |> mist.bind("0.0.0.0")
     |> mist.port(8000)
     |> mist.start
 
