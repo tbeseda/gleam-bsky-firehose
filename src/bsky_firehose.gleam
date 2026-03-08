@@ -149,6 +149,41 @@ fn get_hub_count(hub: Subject(HubMsg)) -> Int {
 
 const firehose_url = "https://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post"
 
+/// Spawns an isolated watcher process for the firehose connection.
+/// The watcher is unlinked from the main process, so WebSocket failures
+/// cannot cascade to the HTTP server.
+fn start_firehose_manager(hub: Subject(HubMsg)) -> Nil {
+  let _pid = process.spawn_unlinked(fn() { firehose_watcher(hub) })
+  Nil
+}
+
+/// Repeatedly connects to the firehose and restarts on failure.
+/// Runs in its own process, spawning an unlinked child for each connection
+/// attempt so that stratus EXIT signals don't kill the watcher.
+fn firehose_watcher(hub: Subject(HubMsg)) -> Nil {
+  let connector_pid =
+    process.spawn_unlinked(fn() {
+      start_firehose(hub)
+      // stratus is linked to this process; block until it dies
+      process.sleep_forever()
+    })
+
+  let mon = process.monitor(connector_pid)
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(mon, fn(_down) { Nil })
+
+  // Block until the connector dies (stratus closed → connector exits)
+  process.selector_receive_forever(from: selector)
+
+  logging.log(
+    logging.Warning,
+    "Firehose: connection lost, reconnecting in 2s...",
+  )
+  process.sleep(2000)
+  firehose_watcher(hub)
+}
+
 /// Connect to the firehose, retrying until data actually flows.
 ///
 /// Stratus v2 has a race condition where the WebSocket handshake succeeds
@@ -323,7 +358,7 @@ pub fn main() {
   logging.log(logging.Info, "  GET /          - server info")
   logging.log(logging.Info, "  GET /firehose  - SSE stream of posts")
 
-  start_firehose(hub)
+  start_firehose_manager(hub)
 
   process.sleep_forever()
 }
