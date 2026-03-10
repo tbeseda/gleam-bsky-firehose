@@ -7,8 +7,9 @@ import gleam/http/response
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import gleam/string
 import gleam/string_tree
 import logging
@@ -93,20 +94,45 @@ pub type HubMsg {
   Unsubscribe(Subject(Post))
   NewPost(Post)
   GetStats(Subject(HubStats))
+  FirehoseConnected
 }
 
 pub type HubStats {
-  HubStats(count: Int, started_at: String)
+  HubStats(
+    count: Int,
+    started_at: String,
+    last_connected_at: String,
+    subscribers: Int,
+    posts_per_minute: Int,
+    posts_per_minute_recent: Int,
+  )
 }
 
 type HubState {
-  HubState(subscribers: List(Subject(Post)), count: Int, started_at: String)
+  HubState(
+    subscribers: List(Subject(Post)),
+    count: Int,
+    started_at: birl.Time,
+    last_connected_at: Option(birl.Time),
+    /// Minute-boundary snapshots of (unix_seconds, count), newest first.
+    /// Used to compute recent posts/min rate. Kept to at most 60 entries.
+    snapshots: List(#(Int, Int)),
+    last_snapshot_sec: Int,
+  )
 }
 
 pub fn start_hub() -> Subject(HubMsg) {
-  let started_at = birl.to_iso8601(birl.now())
+  let now = birl.now()
+  let now_sec = birl.to_unix(now)
   let assert Ok(actor) =
-    actor.new(HubState(subscribers: [], count: 0, started_at: started_at))
+    actor.new(HubState(
+      subscribers: [],
+      count: 0,
+      started_at: now,
+      last_connected_at: None,
+      snapshots: [#(now_sec, 0)],
+      last_snapshot_sec: now_sec,
+    ))
     |> actor.on_message(handle_hub_message)
     |> actor.start
   actor.data
@@ -122,14 +148,76 @@ fn handle_hub_message(state: HubState, msg: HubMsg) {
     }
     NewPost(post) -> {
       list.each(state.subscribers, fn(sub) { process.send(sub, post) })
-      actor.continue(HubState(..state, count: state.count + 1))
+      let new_count = state.count + 1
+
+      // Take a snapshot every 60 seconds for rate calculation
+      let now_sec = birl.to_unix(birl.now())
+      let #(snapshots, last_sec) = case
+        now_sec - state.last_snapshot_sec >= 60
+      {
+        True -> {
+          let new_snapshots =
+            [#(now_sec, new_count), ..state.snapshots]
+            |> list.take(60)
+          #(new_snapshots, now_sec)
+        }
+        False -> #(state.snapshots, state.last_snapshot_sec)
+      }
+
+      actor.continue(
+        HubState(
+          ..state,
+          count: new_count,
+          snapshots: snapshots,
+          last_snapshot_sec: last_sec,
+        ),
+      )
     }
     GetStats(reply) -> {
+      let now = birl.now()
+      let elapsed_sec = birl.to_unix(now) - birl.to_unix(state.started_at)
+      let elapsed_min = case elapsed_sec >= 60 {
+        True -> elapsed_sec / 60
+        False -> 1
+      }
+      let posts_per_minute = state.count / elapsed_min
+
+      // Recent rate from minute snapshots
+      let posts_per_minute_recent = case state.snapshots {
+        [] -> posts_per_minute
+        [latest, ..] -> {
+          let oldest = list.last(state.snapshots) |> result.unwrap(latest)
+          let #(latest_sec, latest_count) = latest
+          let #(oldest_sec, oldest_count) = oldest
+          let span_sec = latest_sec - oldest_sec
+          case span_sec >= 60 {
+            True -> { latest_count - oldest_count } * 60 / span_sec
+            // Not enough history yet, fall back to overall rate
+            False -> posts_per_minute
+          }
+        }
+      }
+
+      let connected_str = case state.last_connected_at {
+        Some(t) -> birl.to_iso8601(t)
+        None -> "not yet"
+      }
+
       process.send(
         reply,
-        HubStats(count: state.count, started_at: state.started_at),
+        HubStats(
+          count: state.count,
+          started_at: birl.to_iso8601(state.started_at),
+          last_connected_at: connected_str,
+          subscribers: list.length(state.subscribers),
+          posts_per_minute: posts_per_minute,
+          posts_per_minute_recent: posts_per_minute_recent,
+        ),
       )
       actor.continue(state)
+    }
+    FirehoseConnected -> {
+      actor.continue(HubState(..state, last_connected_at: Some(birl.now())))
     }
   }
 }
@@ -224,7 +312,10 @@ fn start_firehose(hub: Subject(HubMsg)) -> Nil {
       // Verify data is actually flowing — if not, retry
       process.sleep(2000)
       case get_hub_count(hub) > count_before {
-        True -> logging.log(logging.Info, "Firehose: connected")
+        True -> {
+          process.send(hub, FirehoseConnected)
+          logging.log(logging.Info, "Firehose: connected")
+        }
         False -> {
           logging.log(
             logging.Warning,
@@ -374,7 +465,15 @@ fn handle_request(
       process.send(hub, GetStats(stats_subject))
       let stats = case process.receive(stats_subject, 1000) {
         Ok(s) -> s
-        Error(_) -> HubStats(count: 0, started_at: "unknown")
+        Error(_) ->
+          HubStats(
+            count: 0,
+            started_at: "unknown",
+            last_connected_at: "unknown",
+            subscribers: 0,
+            posts_per_minute: 0,
+            posts_per_minute_recent: 0,
+          )
       }
 
       let body =
@@ -382,9 +481,20 @@ fn handle_request(
         <> firehose_url
         <> "\nStarted: "
         <> stats.started_at
+        <> "\nFirehose last connected: "
+        <> stats.last_connected_at
+        <> "\nSSE subscribers: "
+        <> int.to_string(stats.subscribers)
         <> "\nProcessed: "
         <> int.to_string(stats.count)
-        <> " posts\n\nGET /firehose - SSE stream of posts\n\ncurl -N https://gleam-bsky-firehose.fly.dev/firehose"
+        <> " posts"
+        <> "\nRate (overall): ~"
+        <> int.to_string(stats.posts_per_minute)
+        <> " posts/min"
+        <> "\nRate (recent):  ~"
+        <> int.to_string(stats.posts_per_minute_recent)
+        <> " posts/min"
+        <> "\n\nGET /firehose - SSE stream of posts\n\ncurl -N https://gleam-bsky-firehose.fly.dev/firehose"
 
       response.new(200)
       |> response.set_header("content-type", "text/plain")

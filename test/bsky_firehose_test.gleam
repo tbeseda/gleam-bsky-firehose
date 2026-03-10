@@ -1,6 +1,6 @@
 import bsky_firehose.{
-  type HubStats, Commit, GetStats, NewPost, Post, PostRecord, Subscribe,
-  Unsubscribe,
+  type HubStats, Commit, FirehoseConnected, GetStats, NewPost, Post, PostRecord,
+  Subscribe, Unsubscribe,
 }
 import gleam/erlang/process
 import gleam/json
@@ -209,6 +209,8 @@ pub fn hub_stats_test() {
   process.send(hub, GetStats(stats_subject))
   let assert Ok(stats) = process.receive(stats_subject, 1000)
   assert stats.count == 0
+  assert stats.subscribers == 0
+  assert stats.last_connected_at == "not yet"
 
   let post =
     Post(did: "did:plc:test", time_us: 100, kind: "commit", commit: None)
@@ -221,6 +223,49 @@ pub fn hub_stats_test() {
   process.send(hub, GetStats(stats_subject2))
   let assert Ok(stats2) = process.receive(stats_subject2, 1000)
   assert stats2.count == 3
+}
+
+pub fn hub_firehose_connected_test() {
+  let hub = bsky_firehose.start_hub()
+
+  // Before connection, last_connected_at is "not yet"
+  let s1: process.Subject(HubStats) = process.new_subject()
+  process.send(hub, GetStats(s1))
+  let assert Ok(before) = process.receive(s1, 1000)
+  assert before.last_connected_at == "not yet"
+
+  // Signal a connection
+  process.send(hub, FirehoseConnected)
+  process.sleep(50)
+
+  // Now last_connected_at should be a timestamp
+  let s2: process.Subject(HubStats) = process.new_subject()
+  process.send(hub, GetStats(s2))
+  let assert Ok(after) = process.receive(s2, 1000)
+  assert after.last_connected_at != "not yet"
+}
+
+pub fn hub_stats_subscriber_count_test() {
+  let hub = bsky_firehose.start_hub()
+  let sub1 = process.new_subject()
+  let sub2 = process.new_subject()
+
+  process.send(hub, Subscribe(sub1))
+  process.send(hub, Subscribe(sub2))
+  process.sleep(50)
+
+  let s: process.Subject(HubStats) = process.new_subject()
+  process.send(hub, GetStats(s))
+  let assert Ok(stats) = process.receive(s, 1000)
+  assert stats.subscribers == 2
+
+  process.send(hub, Unsubscribe(sub1))
+  process.sleep(50)
+
+  let s2: process.Subject(HubStats) = process.new_subject()
+  process.send(hub, GetStats(s2))
+  let assert Ok(stats2) = process.receive(s2, 1000)
+  assert stats2.subscribers == 1
 }
 
 pub fn hub_multiple_subscribers_test() {
